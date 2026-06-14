@@ -19,7 +19,7 @@ OpenFortiVPN tray wrapper for **Multimedia University**. Replaces the proprietar
 ### Arch Linux (AUR)
 
 ```bash
-yay -S mmu-vpn-bin
+yay -S mmu-vpn
 ```
 
 ### Debian/Ubuntu

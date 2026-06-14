@@ -8,3 +8,4 @@ dist/
 *.tar.zst
 dist/
 pkg/
+mmu-vpn/
