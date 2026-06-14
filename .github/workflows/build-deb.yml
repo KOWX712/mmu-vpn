@@ -1,0 +1,44 @@
+name: Build DEB
+
+on:
+  workflow_call:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: mmu-vpn-binary
+          path: daemon/target/release/
+
+      - name: Package
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          VERSION=$(echo "$VERSION" | sed 's/[^0-9.]//g')
+          [ -z "$VERSION" ] && VERSION="0.0.0"
+          DEB="mmu-vpn_${VERSION}_amd64"
+
+          mkdir -p "$DEB/DEBIAN" "$DEB/usr/bin" "$DEB/usr/lib/systemd/user" "$DEB/usr/share/applications" "$DEB/usr/share/polkit-1/actions" "$DEB/usr/share/polkit-1/rules.d"
+          install -Dm755 daemon/target/release/mmuvpn "$DEB/usr/bin/mmuvpn"
+          install -Dm644 daemon/mmuvpn.service "$DEB/usr/lib/systemd/user/mmuvpn.service"
+          install -Dm644 daemon/mmuvpn.desktop "$DEB/usr/share/applications/mmuvpn.desktop"
+          install -Dm644 daemon/polkit/cc.kowx712.fortivpn.policy "$DEB/usr/share/polkit-1/actions/cc.kowx712.fortivpn.policy"
+          install -Dm644 daemon/polkit/50-openfortivpn.rules "$DEB/usr/share/polkit-1/rules.d/50-openfortivpn.rules"
+
+          sed "s/%VERSION%/$VERSION/" .github/workflows/files/control > "$DEB/DEBIAN/control"
+
+          dpkg-deb --build "$DEB"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mmu-vpn-deb
+          path: mmu-vpn_*.deb

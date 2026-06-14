@@ -1,0 +1,10 @@
+target/
+dist/
+*.o
+*.so
+*.swp
+*~
+*.tar.gz
+*.tar.zst
+dist/
+pkg/

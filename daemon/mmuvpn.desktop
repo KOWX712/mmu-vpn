@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=MMU VPN
+Comment=Connect to MMU VPN
+Exec=/usr/bin/mmuvpn --start
+Icon=network-vpn
+Terminal=false
+Type=Application
+Categories=Network;

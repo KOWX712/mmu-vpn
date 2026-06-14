@@ -1,0 +1,6 @@
+Package: mmu-vpn
+Version: %VERSION%
+Architecture: amd64
+Depends: openfortivpn, policykit-1, libxdo3
+Description: OpenFortiVPN tray wrapper for Multimedia University (MMU)
+Maintainer: KOWX712 <KOWX712@leecc0503@gmail.com>

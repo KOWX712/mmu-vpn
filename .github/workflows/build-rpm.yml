@@ -1,0 +1,38 @@
+name: Build RPM
+
+on:
+  workflow_call:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: mmu-vpn-binary
+          path: daemon/target/release/
+
+      - name: Package
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          VERSION=$(echo "$VERSION" | sed 's/[^0-9.]//g')
+          [ -z "$VERSION" ] && VERSION="0.0.0"
+
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          sed "s/%VERSION%/$VERSION/" .github/workflows/files/mmu-vpn.spec > mmu-vpn.spec
+          rpmbuild -bb --define "_topdir $(pwd)/rpmbuild" --define "_sourcedir $(pwd)" mmu-vpn.spec
+
+          find rpmbuild/RPMS -name "*.rpm" -exec cp {} . \;
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mmu-vpn-rpm
+          path: "*.rpm"

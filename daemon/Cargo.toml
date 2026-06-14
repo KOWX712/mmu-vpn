@@ -1,0 +1,14 @@
+[package]
+name = "mmuvpn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+tao = "0.30"
+png = "0.17"
+
+[profile.release]
+strip = true
+lto = true

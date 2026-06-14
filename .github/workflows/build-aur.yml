@@ -1,0 +1,36 @@
+name: Build AUR
+
+on:
+  workflow_call:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: mmu-vpn-binary
+          path: daemon/target/release/
+
+      - name: Create tarball
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          [ -z "$VERSION" ] && VERSION="0.0.0"
+
+          mkdir -p dist/usr/bin dist/usr/lib/systemd/user dist/usr/share/applications dist/usr/share/polkit-1/{actions,rules.d}
+
+          install -Dm755 daemon/target/release/mmuvpn dist/usr/bin/mmuvpn
+          install -Dm644 daemon/mmuvpn.service dist/usr/lib/systemd/user/mmuvpn.service
+          install -Dm644 daemon/mmuvpn.desktop dist/usr/share/applications/mmuvpn.desktop
+          install -Dm644 daemon/polkit/cc.kowx712.fortivpn.policy dist/usr/share/polkit-1/actions/cc.kowx712.fortivpn.policy
+          install -Dm644 daemon/polkit/50-openfortivpn.rules dist/usr/share/polkit-1/rules.d/50-openfortivpn.rules
+
+          tar czf "mmu-vpn-bin-${VERSION}.tar.gz" dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mmu-vpn-aur
+          path: mmu-vpn-bin-*.tar.gz
