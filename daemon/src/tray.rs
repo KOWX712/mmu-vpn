@@ -5,6 +5,7 @@ use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 
+use crate::SingleInstance;
 use crate::vpn::{State, VpnDaemon};
 
 const ICON_DISCONNECTED: &[u8] = include_bytes!("../network-vpn-disconnected.png");
@@ -29,7 +30,7 @@ fn icon_for_state(state: State) -> Icon {
     icon_from_png(data)
 }
 
-pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool) {
+pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleInstance) {
     let event_loop = EventLoopBuilder::new().build();
 
     let menu = Menu::new();
@@ -63,7 +64,6 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool) {
             update_menu(&start_item, &stop_item, daemon.lock().unwrap().state);
         }
 
-        // Drain all pending menu events
         while let Ok(event) = menu_channel.try_recv() {
             if event.id == start_item.id() {
                 println!("[mmuvpn] Start VPN clicked");
@@ -84,9 +84,35 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool) {
             }
         }
 
-        // Drain tray icon events
         while let Ok(event) = tray_channel.try_recv() {
             println!("[mmuvpn] Tray event: {:?}", event);
+        }
+
+        while let Some(cmd) = instance.accept_pending() {
+            match cmd.as_str() {
+                "start" => {
+                    println!("[mmuvpn] IPC: start VPN");
+                    daemon.lock().unwrap().start();
+                    let state = daemon.lock().unwrap().state;
+                    update_tray(&mut tray_icon, state);
+                    update_menu(&start_item, &stop_item, state);
+                }
+                "stop" => {
+                    println!("[mmuvpn] IPC: stop VPN");
+                    daemon.lock().unwrap().stop();
+                    update_tray(&mut tray_icon, State::Disconnected);
+                    update_menu(&start_item, &stop_item, State::Disconnected);
+                }
+                "quit" => {
+                    println!("[mmuvpn] IPC: quit daemon");
+                    daemon.lock().unwrap().stop();
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+                other => {
+                    eprintln!("[mmuvpn] Unknown IPC command: {}", other);
+                }
+            }
         }
 
         if let Event::MainEventsCleared | Event::RedrawEventsCleared = event {
