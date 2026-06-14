@@ -1,7 +1,7 @@
 pkgbase = mmu-vpn
 	pkgdesc = OpenFortiVPN tray wrapper for Multimedia University
 	pkgver = 0.1.0
-	pkgrel = 2
+	pkgrel = 3
 	url = https://github.com/KOWX712/mmu-vpn
 	arch = x86_64
 	license = GPL-3.0
