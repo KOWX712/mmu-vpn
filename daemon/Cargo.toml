@@ -7,7 +7,10 @@ edition = "2021"
 tray-icon = "0.19"
 muda = "0.15"
 tao = "0.30"
-png = "0.17"
+resvg = "0.47"
+tiny-skia = "0.12"
+usvg = "0.47"
+dark-light = "2"
 
 [profile.release]
 strip = true
