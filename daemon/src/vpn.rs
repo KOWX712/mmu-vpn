@@ -62,7 +62,9 @@ impl VpnDaemon {
                             if line.contains("Authenticate at") {
                                 if let Some(url) = extract_saml_url(&line) {
                                     println!("[vpn] Opening SAML URL: {}", url);
-                                    let _ = Command::new("xdg-open").arg(&url).spawn();
+                                    if let Ok(mut child) = Command::new("xdg-open").arg(&url).spawn() {
+                                        let _ = child.wait();
+                                    }
                                 }
                             }
                             if line.contains("Tunnel is up") {
@@ -90,23 +92,25 @@ impl VpnDaemon {
     }
 
     pub fn stop(&mut self) {
-        // Send SIGINT to openfortivpn via pkexec for clean shutdown
-        if let Ok(output) = Command::new("pgrep").arg("openfortivpn").output() {
-            let pids = String::from_utf8_lossy(&output.stdout);
-            for pid in pids.lines() {
-                let pid = pid.trim();
-                if !pid.is_empty() {
-                    let _ = Command::new("pkexec")
-                        .args(["kill", "-INT", pid])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn();
-                }
-            }
-        }
-        // Kill pkexec itself (we own it)
+        // Send SIGINT to openfortivpn for clean shutdown
+        let _ = Command::new("pkexec")
+            .args(["pkill", "-INT", "openfortivpn"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
         }
         self.state = State::Disconnected;
     }
@@ -127,16 +131,16 @@ impl VpnDaemon {
             (State::Connecting, true) => self.state = State::Connected,
             (State::Connected, false) => {
                 self.state = State::Disconnected;
-                self.child = None;
+                if let Some(mut child) = self.child.take() {
+                    let _ = child.wait();
+                }
             }
             (State::Connecting, false) => {
-                // Give pkexec a moment to spawn openfortivpn
-                if self.child.is_some() {
-                    // Check if pkexec itself is still alive
-                    if let Some(ref mut child) = self.child {
-                        if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
-                            self.state = State::Disconnected;
-                            self.child = None;
+                if let Some(ref mut child) = self.child {
+                    if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                        self.state = State::Disconnected;
+                        if let Some(mut child) = self.child.take() {
+                            let _ = child.wait();
                         }
                     }
                 } else {
@@ -144,7 +148,9 @@ impl VpnDaemon {
                 }
             }
             (State::Disconnected, false) => {
-                self.child = None;
+                if let Some(mut child) = self.child.take() {
+                    let _ = child.wait();
+                }
             }
             _ => {}
         }

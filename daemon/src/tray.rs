@@ -1,4 +1,7 @@
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use muda::{Menu, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
@@ -14,6 +17,12 @@ const SVG_CONNECTING: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn-acquiring.svg");
 const SVG_CONNECTED: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn.svg");
+
+enum Cmd {
+    Start,
+    Stop,
+    Quit,
+}
 
 fn is_dark() -> bool {
     matches!(dark_light::detect(), Ok(dark_light::Mode::Dark))
@@ -43,6 +52,21 @@ fn icon_for_state(state: State, dark: bool) -> Icon {
         State::Connected => SVG_CONNECTED,
     };
     svg_to_icon(data, dark)
+}
+
+fn wait_for_vpn_stop() {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let running = Command::new("pgrep")
+            .arg("openfortivpn")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !running {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleInstance) {
@@ -81,22 +105,19 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
         }
 
         while let Ok(event) = menu_channel.try_recv() {
-            if event.id == start_item.id() {
-                println!("[mmuvpn] Start VPN clicked");
-                daemon.lock().unwrap().start();
-                let state = daemon.lock().unwrap().state;
-                update_tray(&mut tray_icon, state, dark);
-                update_menu(&start_item, &stop_item, state);
+            let cmd = if event.id == start_item.id() {
+                Some(Cmd::Start)
             } else if event.id == stop_item.id() {
-                println!("[mmuvpn] Stop VPN clicked");
-                daemon.lock().unwrap().stop();
-                update_tray(&mut tray_icon, State::Disconnected, dark);
-                update_menu(&start_item, &stop_item, State::Disconnected);
+                Some(Cmd::Stop)
             } else if event.id == quit_item.id() {
-                println!("[mmuvpn] Quit clicked");
-                daemon.lock().unwrap().stop();
-                *control_flow = ControlFlow::Exit;
-                return;
+                Some(Cmd::Quit)
+            } else {
+                None
+            };
+            if let Some(cmd) = cmd {
+                if handle_cmd(cmd, &mut tray_icon, &start_item, &stop_item, &daemon, dark, control_flow) {
+                    return;
+                }
             }
         }
 
@@ -105,28 +126,18 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
         }
 
         while let Some(cmd) = instance.accept_pending() {
-            match cmd.as_str() {
-                "start" => {
-                    println!("[mmuvpn] IPC: start VPN");
-                    daemon.lock().unwrap().start();
-                    let state = daemon.lock().unwrap().state;
-                    update_tray(&mut tray_icon, state, dark);
-                    update_menu(&start_item, &stop_item, state);
-                }
-                "stop" => {
-                    println!("[mmuvpn] IPC: stop VPN");
-                    daemon.lock().unwrap().stop();
-                    update_tray(&mut tray_icon, State::Disconnected, dark);
-                    update_menu(&start_item, &stop_item, State::Disconnected);
-                }
-                "quit" => {
-                    println!("[mmuvpn] IPC: quit daemon");
-                    daemon.lock().unwrap().stop();
-                    *control_flow = ControlFlow::Exit;
-                    return;
-                }
+            let cmd = match cmd.as_str() {
+                "start" => Some(Cmd::Start),
+                "stop" => Some(Cmd::Stop),
+                "quit" => Some(Cmd::Quit),
                 other => {
                     eprintln!("[mmuvpn] Unknown IPC command: {}", other);
+                    None
+                }
+            };
+            if let Some(cmd) = cmd {
+                if handle_cmd(cmd, &mut tray_icon, &start_item, &stop_item, &daemon, dark, control_flow) {
+                    return;
                 }
             }
         }
@@ -151,6 +162,40 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
             }
         }
     });
+}
+
+fn handle_cmd(
+    cmd: Cmd,
+    tray: &mut tray_icon::TrayIcon,
+    start: &MenuItem,
+    stop: &MenuItem,
+    daemon: &Arc<Mutex<VpnDaemon>>,
+    dark: bool,
+    control_flow: &mut ControlFlow,
+) -> bool {
+    match cmd {
+        Cmd::Start => {
+            println!("[mmuvpn] Start VPN");
+            daemon.lock().unwrap().start();
+            let state = daemon.lock().unwrap().state;
+            update_tray(tray, state, dark);
+            update_menu(start, stop, state);
+        }
+        Cmd::Stop => {
+            println!("[mmuvpn] Stop VPN");
+            daemon.lock().unwrap().stop();
+            update_tray(tray, State::Disconnected, dark);
+            update_menu(start, stop, State::Disconnected);
+        }
+        Cmd::Quit => {
+            println!("[mmuvpn] Quit");
+            daemon.lock().unwrap().stop();
+            wait_for_vpn_stop();
+            *control_flow = ControlFlow::Exit;
+            return true;
+        }
+    }
+    false
 }
 
 fn update_tray(tray: &mut tray_icon::TrayIcon, state: State, dark: bool) {
