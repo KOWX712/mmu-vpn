@@ -12,7 +12,6 @@ OpenFortiVPN tray wrapper for **Multimedia University**. Replaces the proprietar
 ## Requirements
 
 - [openfortivpn](https://github.com/adrienverge/openfortivpn)
-- Rust/Cargo 1.85 or newer when building from source
 - Linux: [polkit](https://github.com/polkit-org/polkit), user in `wheel` group
 - macOS: [Homebrew](https://brew.sh/) and `brew install openfortivpn`
 
@@ -60,17 +59,16 @@ sudo dnf install mmu-vpn-*.rpm
 Install the prerequisites.
 
 ```bash
-brew install openfortivpn rust
+brew install openfortivpn
 ```
 
-Build and install from this checkout.
+Install the latest release (prebuilt binary).
 
 ```bash
-./install.sh
+curl -LSs https://raw.githubusercontent.com/KOWX712/mmu-vpn/master/install.sh | bash
 ```
 
-The installer places `mmuvpn` in the active Homebrew prefix, usually `/opt/homebrew/bin`
-on Apple Silicon or `/usr/local/bin` on Intel. It also writes a LaunchAgent to
+The installer places `mmuvpn` in `/opt/homebrew/bin` and writes a LaunchAgent to
 `~/Library/LaunchAgents/cc.kowx712.mmuvpn.plist`.
 
 On macOS, the app applies VPN DNS with `networksetup` after the tunnel comes up

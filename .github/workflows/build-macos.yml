@@ -1,0 +1,43 @@
+name: Build macOS
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Add x86_64 target
+        run: rustup target add x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+
+      - name: Build both architectures
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: |
+          cargo build --release --manifest-path daemon/Cargo.toml --target x86_64-apple-darwin
+          cargo build --release --manifest-path daemon/Cargo.toml --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          mkdir -p daemon/target/universal/release
+          lipo -create \
+            daemon/target/x86_64-apple-darwin/release/mmuvpn \
+            daemon/target/aarch64-apple-darwin/release/mmuvpn \
+            -output daemon/target/universal/release/mmuvpn
+
+      - name: Package
+        run: |
+          tar -czf mmu-vpn-macos-universal.tar.gz -C daemon/target/universal/release mmuvpn
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mmu-vpn-macos-universal
+          path: mmu-vpn-macos-universal.tar.gz
