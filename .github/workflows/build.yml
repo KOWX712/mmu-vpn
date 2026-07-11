@@ -40,7 +40,6 @@ jobs:
     uses: ./.github/workflows/build-rpm.yml
 
   macos:
-    needs: build
     uses: ./.github/workflows/build-macos.yml
 
   release:
