@@ -109,6 +109,7 @@ fn fallback_stop_command() -> CommandSpec {
     CommandSpec::new(platform::SUDO, ["pkill", "-INT", "openfortivpn"])
 }
 
+#[cfg(not(target_os = "macos"))]
 fn signal_process_command(pid: u32) -> CommandSpec {
     CommandSpec::new("kill", ["-INT".to_string(), pid.to_string()])
 }
@@ -886,6 +887,7 @@ mod tests {
         assert_eq!(stop.args, vec!["pkill", "-INT", "openfortivpn"]);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn signal_command_targets_tracked_child_pid() {
         let cmd = signal_process_command(1234);
