@@ -25,7 +25,6 @@ build() {
 package() {
     cd "$pkgname-$pkgver"
     install -Dm755 daemon/target/release/mmuvpn "$pkgdir/usr/bin/mmuvpn"
-    install -Dm644 daemon/mmuvpn.service "$pkgdir/usr/lib/systemd/user/mmuvpn.service"
     install -Dm644 daemon/mmuvpn.desktop "$pkgdir/usr/share/applications/mmuvpn.desktop"
     install -Dm644 daemon/polkit/cc.kowx712.fortivpn.policy "$pkgdir/usr/share/polkit-1/actions/cc.kowx712.fortivpn.policy"
     install -Dm644 daemon/polkit/50-openfortivpn.rules "$pkgdir/usr/share/polkit-1/rules.d/50-openfortivpn.rules"
