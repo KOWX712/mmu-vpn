@@ -27,9 +27,8 @@ jobs:
           [ -z "$VERSION" ] && VERSION="0.0.0"
           DEB="mmu-vpn_${VERSION}_amd64"
 
-          mkdir -p "$DEB/DEBIAN" "$DEB/usr/bin" "$DEB/usr/lib/systemd/user" "$DEB/usr/share/applications" "$DEB/usr/share/polkit-1/actions" "$DEB/usr/share/polkit-1/rules.d"
+          mkdir -p "$DEB/DEBIAN" "$DEB/usr/bin" "$DEB/usr/share/applications" "$DEB/usr/share/polkit-1/actions" "$DEB/usr/share/polkit-1/rules.d"
           install -Dm755 daemon/target/release/mmuvpn "$DEB/usr/bin/mmuvpn"
-          install -Dm644 daemon/mmuvpn.service "$DEB/usr/lib/systemd/user/mmuvpn.service"
           install -Dm644 daemon/mmuvpn.desktop "$DEB/usr/share/applications/mmuvpn.desktop"
           install -Dm644 daemon/polkit/cc.kowx712.fortivpn.policy "$DEB/usr/share/polkit-1/actions/cc.kowx712.fortivpn.policy"
           install -Dm644 daemon/polkit/50-openfortivpn.rules "$DEB/usr/share/polkit-1/rules.d/50-openfortivpn.rules"

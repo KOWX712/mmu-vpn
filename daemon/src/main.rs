@@ -1,3 +1,4 @@
+mod service;
 mod tray;
 mod vpn;
 
@@ -60,25 +61,44 @@ fn usage() {
     eprintln!("  --stop       Stop VPN (and restore DNS on macOS)");
     eprintln!("  --quit       Stop VPN, restore DNS, and exit daemon");
     eprintln!("  --cleanup    Emergency cleanup: kill VPN + restore DNS");
-    eprintln!("               (works even if tray is not running)");
+    eprintln!("  --service    [status|enable|disable]  Manage the login service");
     eprintln!("  --help       Show this help");
+}
+
+fn parse_service_action(arg: Option<&str>) -> Result<service::ServiceAction, String> {
+    match arg {
+        Some("status") => Ok(service::ServiceAction::Status),
+        Some("enable") => Ok(service::ServiceAction::Enable),
+        Some("disable") => Ok(service::ServiceAction::Disable),
+        Some(other) => Err(format!("Unknown service action: {other}")),
+        None => Err("Missing service action: use status, enable, or disable".to_string()),
+    }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    match args.first().map(|s| s.as_str()) {
-        Some("--help") | Some("-h") => {
+    match args.as_slice() {
+        [] => {
+            let _inst = SingleInstance::acquire().unwrap_or_else(|| {
+                eprintln!("Another mmuvpn instance is already running");
+                std::process::exit(1);
+            });
+            let daemon = Arc::new(Mutex::new(vpn::VpnDaemon::new()));
+            daemon.lock().unwrap().bootstrap_cleanup();
+            tray::run(daemon, false, _inst);
+        }
+        [flag] if flag == "--help" || flag == "-h" => {
             usage();
         }
-        Some("--cleanup") | Some("--fix-dns") => {
+        [flag] if flag == "--cleanup" || flag == "--fix-dns" => {
             // Prefer asking the running tray to stop cleanly first.
             let _ = send_command("stop");
             std::thread::sleep(std::time::Duration::from_millis(400));
             vpn::emergency_cleanup();
             println!("Cleanup done.");
         }
-        Some("--stop") => {
+        [flag] if flag == "--stop" => {
             if send_command("stop") {
                 println!("VPN stop signal sent");
             } else {
@@ -87,7 +107,7 @@ fn main() {
                 println!("VPN stopped (no tray was running)");
             }
         }
-        Some("--quit") => {
+        [flag] if flag == "--quit" => {
             if send_command("quit") {
                 println!("Daemon quit");
             } else {
@@ -96,7 +116,7 @@ fn main() {
                 vpn::emergency_cleanup();
             }
         }
-        Some("--start") => {
+        [flag] if flag == "--start" => {
             if send_command("start") {
                 println!("VPN start signal sent");
             } else {
@@ -113,16 +133,32 @@ fn main() {
                 tray::run(daemon, false, _inst);
             }
         }
-        None => {
-            let _inst = SingleInstance::acquire().unwrap_or_else(|| {
-                eprintln!("Another mmuvpn instance is already running");
-                std::process::exit(1);
-            });
-            let daemon = Arc::new(Mutex::new(vpn::VpnDaemon::new()));
-            daemon.lock().unwrap().bootstrap_cleanup();
-            tray::run(daemon, false, _inst);
+        [flag, service_mode] if flag == "--service" => {
+            match parse_service_action(Some(service_mode.as_str())) {
+                Ok(action) => {
+                    if let Err(err) = service::run(action) {
+                        eprintln!("{err}");
+                        std::process::exit(1);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("{err}");
+                    usage();
+                    std::process::exit(1);
+                }
+            }
         }
-        Some(other) => {
+        [flag] if flag == "--service" => {
+            eprintln!("Missing service action: use status, enable, or disable");
+            usage();
+            std::process::exit(1);
+        }
+        [flag, ..] if flag == "--service" => {
+            eprintln!("Too many arguments for --service");
+            usage();
+            std::process::exit(1);
+        }
+        [other, ..] => {
             eprintln!("Unknown option: {}", other);
             usage();
             std::process::exit(1);

@@ -6,14 +6,13 @@ OpenFortiVPN tray wrapper for **Multimedia University**. Replaces the proprietar
 
 - System tray icon with live VPN status (disconnected / connecting / connected)
 - SAML SSO authentication — opens browser automatically
-- Linux systemd user service for auto-start on login
-- macOS menu bar support with LaunchAgent auto-start option
+- Linux and macOS login service management from the CLI
 
 ## Requirements
 
 - [openfortivpn](https://github.com/adrienverge/openfortivpn)
 - Linux: [polkit](https://github.com/polkit-org/polkit), user in `wheel` group
-- macOS: [Homebrew](https://brew.sh/) and `brew install openfortivpn`
+- macOS: [Homebrew](https://brew.sh/)
 
 ## Installation
 
@@ -56,24 +55,9 @@ sudo dnf install mmu-vpn-*.rpm
 
 ### macOS
 
-Install the prerequisites.
+Use the universal installation method.
 
-```bash
-brew install openfortivpn
-```
-
-Install the latest release (prebuilt binary).
-
-```bash
-curl -LSs https://raw.githubusercontent.com/KOWX712/mmu-vpn/master/install.sh | bash
-```
-
-The installer places `mmuvpn` in `/opt/homebrew/bin` and writes a LaunchAgent to
-`~/Library/LaunchAgents/cc.kowx712.mmuvpn.plist`.
-
-On macOS, the app applies VPN DNS with `networksetup` after the tunnel comes up
-and restores previous DNS on disconnect. Previous DNS is saved at
-`/tmp/mmuvpn-dns-backup` so `mmuvpn --cleanup` can recover after a crash.
+On macOS, the app applies VPN DNS with `networksetup` after the tunnel comes up and restores previous DNS on disconnect. Previous DNS is saved at `/tmp/mmuvpn-dns-backup` so `mmuvpn --cleanup` can recover after a crash.
 
 If DNS or the VPN is left stuck after a crash, run:
 
@@ -83,22 +67,21 @@ mmuvpn --cleanup
 
 That stops openfortivpn (if any) and restores DNS even when the tray is not running.
 
-Enable auto-start on login:
-
-```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/cc.kowx712.mmuvpn.plist
-```
-
-Disable auto-start:
-
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/cc.kowx712.mmuvpn.plist
-```
-
 ## Usage
 
-### Systemd (auto-start on login)
+### Tray App
 
-```bash
-systemctl --user enable --now mmuvpn.service
-```
+- Launch and all set, click the tray icon to control the connection status.
+
+### CLI
+
+| Command | Description |
+| --- | --- |
+| `mmuvpn` | Start the tray daemon |
+| `mmuvpn --start` | Start VPN (and tray if not running) |
+| `mmuvpn --stop` | Stop VPN and restore DNS on macOS |
+| `mmuvpn --quit` | Stop VPN, restore DNS, and exit daemon |
+| `mmuvpn --cleanup` | Emergency cleanup for leftover VPN/DNS state |
+| `mmuvpn --service status` | Show the login service status |
+| `mmuvpn --service enable` | Install and start the login service |
+| `mmuvpn --service disable` | Stop and remove the login service |
