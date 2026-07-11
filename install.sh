@@ -34,7 +34,21 @@ check_deps() {
     done
 }
 
+check_macos_deps() {
+    local deps=(curl tar)
+    for cmd in "${deps[@]}"; do
+        command -v "$cmd" &>/dev/null || die "Required command '${cmd}' not found. Please install it first."
+    done
+
+    command -v brew &>/dev/null || die "Homebrew is required on macOS. Install it from https://brew.sh, then rerun this script."
+}
+
 detect_distro() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo "darwin"
+        return
+    fi
+
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         case "$ID" in
@@ -144,6 +158,130 @@ install_arch() {
     fi
 }
 
+install_file() {
+    local src="$1"
+    local dest="$2"
+    local mode="$3"
+    local dir
+    dir=$(dirname "$dest")
+
+    if [ -w "$dir" ]; then
+        install -m "$mode" "$src" "$dest"
+    else
+        sudo install -m "$mode" "$src" "$dest"
+    fi
+}
+
+install_launch_agent() {
+    local binary_path="$1"
+    local brew_prefix="$2"
+    local agents_dir="$HOME/Library/LaunchAgents"
+    local plist_path="${agents_dir}/cc.kowx712.mmuvpn.plist"
+
+    mkdir -p "$agents_dir"
+    cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>cc.kowx712.mmuvpn</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${binary_path}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${brew_prefix}/bin:${brew_prefix}/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/tmp/mmuvpn.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/mmuvpn.err</string>
+</dict>
+</plist>
+PLIST
+
+    echo "LaunchAgent written to ${plist_path}"
+    LAST_PLIST_PATH="$plist_path"
+}
+
+ensure_openfortivpn_macos() {
+    if command -v openfortivpn &>/dev/null; then
+        return
+    fi
+
+    echo "Installing openfortivpn with Homebrew..."
+    brew install openfortivpn || die "Failed to install openfortivpn. Install it manually with: brew install openfortivpn"
+}
+
+clear_macos_quarantine() {
+    local install_path="$1"
+
+    if command -v xattr &>/dev/null; then
+        xattr -d com.apple.quarantine "$install_path" 2>/dev/null || true
+    fi
+}
+
+load_launch_agent() {
+    local plist_path="$1"
+    local user_domain="gui/$(id -u)"
+
+    if ! command -v launchctl &>/dev/null; then
+        return
+    fi
+
+    launchctl bootout "$user_domain" "$plist_path" 2>/dev/null || true
+    if launchctl bootstrap "$user_domain" "$plist_path" 2>/dev/null; then
+        echo "LaunchAgent loaded for login startup."
+        return
+    fi
+
+    echo "LaunchAgent was written but could not be loaded automatically."
+    echo "Enable login start with:"
+    echo "  launchctl bootstrap ${user_domain} ${plist_path}"
+    echo "Disable login start with:"
+    echo "  launchctl bootout ${user_domain} ${plist_path}"
+}
+
+install_macos() {
+    local tag="$1"
+    local brew_prefix install_dir install_path
+    LAST_PLIST_PATH=""
+
+    check_macos_deps
+    ensure_openfortivpn_macos
+
+    brew_prefix=$(brew --prefix)
+    install_dir="${brew_prefix}/bin"
+    install_path="${install_dir}/${BINARY}"
+
+    if [ -z "$tag" ]; then
+        echo "Fetching latest release..."
+        tag=$(get_latest_tag) || die "Failed to fetch latest release tag"
+    fi
+
+    local filename="mmu-vpn-macos-universal.tar.gz"
+    local url="https://github.com/${REPO}/releases/download/${tag}/${filename}"
+    echo "Downloading $url"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap "rm -rf '$tmpdir'" EXIT
+    curl -fSL -o "${tmpdir}/${filename}" "$url" || die "Prebuilt binary not available at ${tag}"
+    tar -xzf "${tmpdir}/${filename}" -C "$tmpdir"
+    install_file "${tmpdir}/mmuvpn" "$install_path" 755
+    clear_macos_quarantine "$install_path"
+    install_launch_agent "$install_path" "$brew_prefix"
+    load_launch_agent "$LAST_PLIST_PATH"
+    echo "Installed $PKG_NAME $tag (prebuilt)"
+}
+
 main() {
     local tag=""
 
@@ -170,6 +308,7 @@ main() {
     echo "Detected distro family: $distro"
 
     case "$distro" in
+        darwin) install_macos "$tag" ;;
         debian) install_debian "$tag" ;;
         rhel)   install_rhel "$tag" ;;
         arch)   install_arch "$tag" ;;

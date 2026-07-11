@@ -57,8 +57,10 @@ fn usage() {
     eprintln!("Options:");
     eprintln!("  (no args)    Start tray daemon");
     eprintln!("  --start      Start VPN (and tray if not running)");
-    eprintln!("  --stop       Stop VPN");
-    eprintln!("  --quit       Kill all and exit daemon");
+    eprintln!("  --stop       Stop VPN (and restore DNS on macOS)");
+    eprintln!("  --quit       Stop VPN, restore DNS, and exit daemon");
+    eprintln!("  --cleanup    Emergency cleanup: kill VPN + restore DNS");
+    eprintln!("               (works even if tray is not running)");
     eprintln!("  --help       Show this help");
 }
 
@@ -69,20 +71,29 @@ fn main() {
         Some("--help") | Some("-h") => {
             usage();
         }
+        Some("--cleanup") | Some("--fix-dns") => {
+            // Prefer asking the running tray to stop cleanly first.
+            let _ = send_command("stop");
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            vpn::emergency_cleanup();
+            println!("Cleanup done.");
+        }
         Some("--stop") => {
             if send_command("stop") {
-                println!("VPN stopped");
+                println!("VPN stop signal sent");
             } else {
-                let mut daemon = vpn::VpnDaemon::new();
-                daemon.stop();
-                println!("VPN stopped");
+                // No tray — still tear down openfortivpn + DNS.
+                vpn::emergency_cleanup();
+                println!("VPN stopped (no tray was running)");
             }
         }
         Some("--quit") => {
             if send_command("quit") {
                 println!("Daemon quit");
             } else {
-                println!("No daemon running");
+                // Tray already gone: still clean up VPN/DNS leftovers.
+                println!("No tray daemon running; cleaning up VPN/DNS...");
+                vpn::emergency_cleanup();
             }
         }
         Some("--start") => {
@@ -94,7 +105,11 @@ fn main() {
                     std::process::exit(1);
                 });
                 let daemon = Arc::new(Mutex::new(vpn::VpnDaemon::new()));
-                daemon.lock().unwrap().start();
+                {
+                    let mut d = daemon.lock().unwrap();
+                    d.bootstrap_cleanup();
+                    d.start();
+                }
                 tray::run(daemon, false, _inst);
             }
         }
@@ -104,6 +119,7 @@ fn main() {
                 std::process::exit(1);
             });
             let daemon = Arc::new(Mutex::new(vpn::VpnDaemon::new()));
+            daemon.lock().unwrap().bootstrap_cleanup();
             tray::run(daemon, false, _inst);
         }
         Some(other) => {

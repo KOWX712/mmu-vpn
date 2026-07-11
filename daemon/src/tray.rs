@@ -189,6 +189,7 @@ fn handle_cmd(
         }
         Cmd::Quit => {
             println!("[mmuvpn] Quit");
+            // stop() already kills openfortivpn + restores DNS in one admin prompt on macOS.
             daemon.lock().unwrap().stop();
             wait_for_vpn_stop();
             *control_flow = ControlFlow::Exit;
