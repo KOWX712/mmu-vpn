@@ -1,11 +1,30 @@
+#[cfg(target_os = "macos")]
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader};
+#[cfg(target_os = "macos")]
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Platform-specific executables (compile-time static binding via #[cfg]).
+mod platform {
+    #[cfg(target_os = "macos")]
+    pub const SUDO: &str = "sudo";
+    #[cfg(not(target_os = "macos"))]
+    pub const SUDO: &str = "pkexec";
+
+    #[cfg(target_os = "macos")]
+    pub const OPEN: &str = "open";
+    #[cfg(not(target_os = "macos"))]
+    pub const OPEN: &str = "xdg-open";
+}
 
 const GATEWAY: &str = "vpnmlk.mmu.edu.my";
 const PORT: &str = "443";
@@ -41,7 +60,7 @@ fn build_command(spec: &CommandSpec) -> Command {
 }
 
 fn which_binary(name: &str) -> Option<String> {
-    Command::new("/usr/bin/which")
+    Command::new("which")
         .arg(name)
         .output()
         .ok()
@@ -71,10 +90,9 @@ fn openfortivpn_bin() -> String {
         .unwrap_or_else(|| "openfortivpn".to_string())
 }
 
-#[cfg(target_os = "macos")]
 fn start_vpn_command(gateway_port: &str) -> CommandSpec {
     CommandSpec::new(
-        "sudo",
+        platform::SUDO,
         [
             openfortivpn_bin(),
             gateway_port.to_string(),
@@ -83,36 +101,12 @@ fn start_vpn_command(gateway_port: &str) -> CommandSpec {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
-fn start_vpn_command(gateway_port: &str) -> CommandSpec {
-    CommandSpec::new(
-        "pkexec",
-        [
-            openfortivpn_bin(),
-            gateway_port.to_string(),
-            "--saml-login".to_string(),
-        ],
-    )
-}
-
-#[cfg(target_os = "macos")]
 fn open_url_command(url: &str) -> CommandSpec {
-    CommandSpec::new("open", [url])
+    CommandSpec::new(platform::OPEN, [url])
 }
 
-#[cfg(not(target_os = "macos"))]
-fn open_url_command(url: &str) -> CommandSpec {
-    CommandSpec::new("xdg-open", [url])
-}
-
-#[cfg(target_os = "macos")]
 fn fallback_stop_command() -> CommandSpec {
-    CommandSpec::new("sudo", ["pkill", "-INT", "openfortivpn"])
-}
-
-#[cfg(not(target_os = "macos"))]
-fn fallback_stop_command() -> CommandSpec {
-    CommandSpec::new("pkexec", ["pkill", "-INT", "openfortivpn"])
+    CommandSpec::new(platform::SUDO, ["pkill", "-INT", "openfortivpn"])
 }
 
 fn signal_process_command(pid: u32) -> CommandSpec {
@@ -183,8 +177,6 @@ impl VpnDaemon {
                     if Path::new(DNS_BACKUP_PATH).exists() {
                         eprintln!("[vpn] Startup DNS cleanup failed: {}", e);
                     }
-                } else if !Path::new(DNS_BACKUP_PATH).exists() {
-                    // restored and removed, or nothing to do
                 }
             }
         }
@@ -263,10 +255,13 @@ impl VpnDaemon {
 
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = build_command(&signal_process_command(child.id()))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = build_command(&signal_process_command(child.id()))
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
 
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
@@ -864,11 +859,10 @@ mod tests {
         assert!(!is_private_ipv4("not-an-ip"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn macos_uses_sudo_openfortivpn_and_open_browser() {
+    fn start_vpn_uses_platform_sudo() {
         let start = start_vpn_command("vpnmlk.mmu.edu.my:443");
-        assert_eq!(start.program, "sudo");
+        assert_eq!(start.program, platform::SUDO);
         assert!(
             start.args[0].ends_with("openfortivpn") || start.args[0] == "openfortivpn",
             "expected openfortivpn path, got {}",
@@ -876,31 +870,19 @@ mod tests {
         );
         assert_eq!(start.args[1], "vpnmlk.mmu.edu.my:443");
         assert_eq!(start.args[2], "--saml-login");
-
-        let browser = open_url_command("https://vpn.example.test/saml");
-        assert_eq!(browser.program, "open");
-        assert_eq!(browser.args, vec!["https://vpn.example.test/saml"]);
-
-        let stop = fallback_stop_command();
-        assert_eq!(stop.program, "sudo");
-        assert_eq!(stop.args, vec!["pkill", "-INT", "openfortivpn"]);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn linux_keeps_pkexec_openfortivpn_and_xdg_open() {
-        let start = start_vpn_command("vpnmlk.mmu.edu.my:443");
-        assert_eq!(start.program, "pkexec");
-        assert!(start.args[0].ends_with("openfortivpn") || start.args[0] == "openfortivpn");
-        assert_eq!(start.args[1], "vpnmlk.mmu.edu.my:443");
-        assert_eq!(start.args[2], "--saml-login");
-
+    fn open_url_uses_platform_open() {
         let browser = open_url_command("https://vpn.example.test/saml");
-        assert_eq!(browser.program, "xdg-open");
+        assert_eq!(browser.program, platform::OPEN);
         assert_eq!(browser.args, vec!["https://vpn.example.test/saml"]);
+    }
 
+    #[test]
+    fn fallback_stop_uses_platform_sudo() {
         let stop = fallback_stop_command();
-        assert_eq!(stop.program, "pkexec");
+        assert_eq!(stop.program, platform::SUDO);
         assert_eq!(stop.args, vec!["pkill", "-INT", "openfortivpn"]);
     }
 
