@@ -1,0 +1,92 @@
+name: Publish AUR
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-aur-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      AUR_REPO_URL: https://aur.archlinux.org/mmu-vpn.git
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Initialize System & Install Packages
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm git base-devel gcc pacman-contrib openssh
+
+      - name: Clone packaging repo
+        run: |
+          set -euo pipefail
+
+          useradd --create-home --shell /bin/bash builder
+
+          package_dir="$(mktemp -d)"
+          git clone "$AUR_REPO_URL" "$package_dir"
+          git -C "$package_dir" config user.name "github-actions[bot]"
+          git -C "$package_dir" config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            pkgrel="$(awk -F= '/^pkgrel=/{print $2; exit}' "$package_dir/PKGBUILD")"
+            [ -n "$pkgrel" ] || exit 1
+            sed -i "s/^pkgrel=.*/pkgrel=$((pkgrel + 1))/" "$package_dir/PKGBUILD"
+          else
+            pkgver="${RELEASE_TAG#v}"
+            [ -n "$pkgver" ] || exit 1
+
+            sed -i "s/^pkgver=.*/pkgver=${pkgver}/" "$package_dir/PKGBUILD"
+            sed -i 's/^pkgrel=.*/pkgrel=1/' "$package_dir/PKGBUILD"
+          fi
+
+          chown -R builder:builder "$package_dir"
+          su builder -s /bin/bash -c "cd '$package_dir' && updpkgsums && makepkg --printsrcinfo > .SRCINFO"
+          chown -R root:root "$package_dir"
+
+          git -C "$package_dir" add PKGBUILD .SRCINFO
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            commit_message="Publish Arch package pkgrel bump"
+          else
+            commit_message="Publish Arch package ${RELEASE_TAG}"
+          fi
+          git -C "$package_dir" commit -m "$commit_message"
+
+          echo "PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
+
+      - name: Push to GitHub packaging branch
+        run: |
+          set -euo pipefail
+
+          git -C "$PACKAGE_DIR" remote add github "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$PACKAGE_DIR" push --force github HEAD:aur
+
+      - name: Push to AUR
+        env:
+          AUR_REMOTE_URL: ssh://aur@aur.archlinux.org/mmu-vpn.git
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          aur_key="$RUNNER_TEMP/aur_key"
+          aur_known_hosts="$RUNNER_TEMP/aur_known_hosts"
+
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$aur_key"
+          chmod 600 "$aur_key"
+
+          ssh-keyscan -H aur.archlinux.org > "$aur_known_hosts"
+
+          git -C "$PACKAGE_DIR" remote add aur "$AUR_REMOTE_URL"
+          GIT_SSH_COMMAND="ssh -i $aur_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$aur_known_hosts -o StrictHostKeyChecking=yes" \
+            git -C "$PACKAGE_DIR" push --force aur HEAD:master
