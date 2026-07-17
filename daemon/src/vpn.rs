@@ -121,20 +121,26 @@ struct TunnelWatch {
     dns_servers: Mutex<Vec<String>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum State {
     Disconnected,
     Connecting,
     Connected,
+    Error(String),
 }
 
 impl State {
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            State::Disconnected => "Disconnected",
-            State::Connecting => "Connecting",
-            State::Connected => "Connected",
+            State::Disconnected => "Disconnected".to_string(),
+            State::Connecting => "Connecting".to_string(),
+            State::Connected => "Connected".to_string(),
+            State::Error(msg) => format!("Error: {}", msg),
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self, State::Connecting | State::Connected)
     }
 }
 
@@ -154,6 +160,9 @@ pub struct VpnDaemon {
     tunnel: Arc<TunnelWatch>,
     #[cfg(target_os = "macos")]
     dns_applied: bool,
+    connect_start: Option<Instant>,
+    last_health_check: Instant,
+    on_campus: bool,
 }
 
 impl VpnDaemon {
@@ -165,6 +174,9 @@ impl VpnDaemon {
             tunnel: Arc::new(TunnelWatch::default()),
             #[cfg(target_os = "macos")]
             dns_applied: false,
+            connect_start: None,
+            last_health_check: Instant::now(),
+            on_campus: false,
         }
     }
 
@@ -184,10 +196,19 @@ impl VpnDaemon {
     }
 
     pub fn start(&mut self) {
-        if self.state != State::Disconnected {
+        if self.state.is_active() {
             return;
         }
+
+        // Pre-check: detect if already on campus network
+        self.on_campus = check_university_reachable();
+        if self.on_campus {
+            println!("[vpn] University resources already accessible (campus network detected)");
+            println!("[vpn] VPN connection will proceed anyway");
+        }
+
         self.state = State::Connecting;
+        self.connect_start = Some(Instant::now());
         self.tunnel.up.store(false, Ordering::SeqCst);
         if let Ok(mut dns) = self.tunnel.dns_servers.lock() {
             dns.clear();
@@ -255,52 +276,58 @@ impl VpnDaemon {
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = build_command(&signal_process_command(child.id()))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
+        println!("[vpn] Stopping VPN...");
 
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // One admin prompt: kill openfortivpn + restore DNS + flush cache.
-            if let Err(e) = stop_vpn_and_restore_dns() {
-                eprintln!("[vpn] stop cleanup: {}", e);
-                // Fallback if combined path fails.
-                let _ = build_command(&fallback_stop_command())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                if let Err(e2) = restore_macos_dns_from_backup() {
-                    eprintln!("[vpn] DNS restore: {}", e2);
-                }
-            }
-            self.dns_applied = false;
-        }
-
+        // Get child PID before taking it
         #[cfg(not(target_os = "macos"))]
-        {
-            let _ = build_command(&fallback_stop_command())
+        let child_pid = self.child.as_ref().map(|c| c.id());
+
+        // Signal child process first (synchronously to ensure it happens)
+        #[cfg(not(target_os = "macos"))]
+        if let Some(pid) = child_pid {
+            println!("[vpn] Sending SIGINT to openfortivpn PID {}", pid);
+            let _ = build_command(&signal_process_command(pid))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
+        }
+
+        // Take child and wait in background thread
+        if let Some(mut child) = self.child.take() {
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                        println!("[vpn] Child process exited");
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        println!("[vpn] Child process timeout, killing");
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            });
+        }
+
+        // Give signal time to propagate before pkill
+        thread::sleep(Duration::from_millis(200));
+
+        // Always use pkill as backup to catch any orphaned processes
+        println!("[vpn] Running pkill to ensure cleanup");
+        let _ = build_command(&fallback_stop_command())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Err(e) = restore_macos_dns_from_backup() {
+                eprintln!("[vpn] DNS restore: {}", e);
+            }
+            self.dns_applied = false;
         }
 
         self.tunnel.up.store(false, Ordering::SeqCst);
@@ -308,6 +335,10 @@ impl VpnDaemon {
             dns.clear();
         }
         self.state = State::Disconnected;
+        self.connect_start = None;
+        self.on_campus = false;
+
+        println!("[vpn] Stop complete");
     }
 
     pub fn check_alive(&mut self) {
@@ -319,13 +350,49 @@ impl VpnDaemon {
         let running = openfortivpn_running();
         let tunnel_up = self.tunnel.up.load(Ordering::SeqCst);
 
-        match (self.state, running, tunnel_up) {
-            (State::Connecting, true, true) => {
-                #[cfg(target_os = "macos")]
-                self.apply_macos_dns_if_needed();
-                self.state = State::Connected;
+        // Check for connection timeout (60 seconds in Connecting state)
+        if matches!(self.state, State::Connecting) {
+            if let Some(start) = self.connect_start {
+                if start.elapsed() > Duration::from_secs(60) {
+                    eprintln!("[vpn] Connection timeout - no tunnel after 60s");
+                    self.state = State::Error("Connection timeout - check logs or run --cleanup".to_string());
+                    self.connect_start = None;
+                    if let Some(mut child) = self.child.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    let _ = build_command(&fallback_stop_command())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    return;
+                }
             }
-            (State::Connecting, true, false) => {}
+        }
+
+        match (&self.state, running, tunnel_up) {
+            (State::Connecting, true, true) => {
+                // Verify connectivity before declaring success
+                println!("[vpn] Tunnel reported up, verifying connectivity...");
+                if check_university_reachable() {
+                    #[cfg(target_os = "macos")]
+                    self.apply_macos_dns_if_needed();
+                    self.state = State::Connected;
+                    self.connect_start = None;
+                    self.last_health_check = Instant::now();
+                    println!("[vpn] Connectivity verified - connected successfully");
+                } else if !self.on_campus {
+                    // Not on campus and can't reach university - this is an error
+                    eprintln!("[vpn] Tunnel up but university resources unreachable");
+                    self.state = State::Error("Tunnel up but no connectivity".to_string());
+                    self.connect_start = None;
+                }
+                // If on_campus=true, resources were accessible before, so we can't verify VPN is working
+                // In this case, trust the tunnel_up signal
+            }
+            (State::Connecting, true, false) => {
+                // Still connecting, do nothing
+            }
             (State::Connected, false, _) => {
                 #[cfg(target_os = "macos")]
                 {
@@ -336,15 +403,29 @@ impl VpnDaemon {
                 }
                 self.state = State::Disconnected;
                 self.tunnel.up.store(false, Ordering::SeqCst);
+                self.connect_start = None;
                 if let Some(mut child) = self.child.take() {
                     let _ = child.wait();
                 }
             }
+            (State::Connected, true, true) => {
+                // Periodic health check every 15 seconds
+                if self.last_health_check.elapsed() > Duration::from_secs(15) {
+                    self.last_health_check = Instant::now();
+                    if !check_university_reachable() {
+                        eprintln!("[vpn] Health check failed - university resources unreachable");
+                        self.state = State::Error("Connection lost - university unreachable".to_string());
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                self.apply_macos_dns_if_needed();
+            }
             (State::Connecting, false, _) => {
                 if let Some(ref mut child) = self.child {
                     if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
-                        self.state = State::Disconnected;
+                        self.state = State::Error("openfortivpn process exited unexpectedly".to_string());
                         self.tunnel.up.store(false, Ordering::SeqCst);
+                        self.connect_start = None;
                         if let Some(mut child) = self.child.take() {
                             let _ = child.wait();
                         }
@@ -352,6 +433,7 @@ impl VpnDaemon {
                 } else {
                     self.state = State::Disconnected;
                     self.tunnel.up.store(false, Ordering::SeqCst);
+                    self.connect_start = None;
                 }
             }
             (State::Disconnected, false, _) => {
@@ -359,9 +441,8 @@ impl VpnDaemon {
                     let _ = child.wait();
                 }
             }
-            (State::Connected, true, true) => {
-                #[cfg(target_os = "macos")]
-                self.apply_macos_dns_if_needed();
+            (State::Error(_), _, _) => {
+                // Stay in error state until user takes action
             }
             _ => {}
         }
@@ -418,6 +499,16 @@ fn openfortivpn_running() -> bool {
         .arg("openfortivpn")
         .output()
         .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn check_university_reachable() -> bool {
+    Command::new("ping")
+        .args(["-c", "1", "-W", "2", "erep.mmu.edu.my"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
 }
 

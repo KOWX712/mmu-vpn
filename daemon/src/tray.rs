@@ -17,6 +17,8 @@ const SVG_CONNECTING: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn-acquiring.svg");
 const SVG_CONNECTED: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn.svg");
+const SVG_ERROR: &[u8] =
+    include_bytes!("../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
 
 enum Cmd {
     Start,
@@ -45,11 +47,12 @@ fn svg_to_icon(svg_data: &[u8], dark: bool) -> Icon {
     Icon::from_rgba(pixmap.data().to_vec(), w, h).unwrap()
 }
 
-fn icon_for_state(state: State, dark: bool) -> Icon {
+fn icon_for_state(state: &State, dark: bool) -> Icon {
     let data = match state {
         State::Disconnected => SVG_DISCONNECTED,
         State::Connecting => SVG_CONNECTING,
         State::Connected => SVG_CONNECTED,
+        State::Error(_) => SVG_ERROR,
     };
     svg_to_icon(data, dark)
 }
@@ -82,8 +85,8 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
     let mut dark = is_dark();
     let mut tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("MMU VPN — Disconnected")
-        .with_icon(icon_for_state(State::Disconnected, dark))
+        .with_tooltip(format!("MMU VPN — {}", daemon.lock().unwrap().state.label()))
+        .with_icon(icon_for_state(&State::Disconnected, dark))
         .build()
         .expect("Failed to create tray icon");
 
@@ -101,7 +104,8 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
         *control_flow = ControlFlow::Poll;
 
         if let Event::NewEvents(StartCause::Init) = event {
-            update_menu(&start_item, &stop_item, daemon.lock().unwrap().state);
+            let state = &daemon.lock().unwrap().state;
+            update_menu(&start_item, &stop_item, state);
         }
 
         while let Ok(event) = menu_channel.try_recv() {
@@ -147,18 +151,18 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
             if new_dark != dark {
                 dark = new_dark;
                 println!("[mmuvpn] Theme changed: dark={}", dark);
-                let state = daemon.lock().unwrap().state;
+                let state = &daemon.lock().unwrap().state;
                 update_tray(&mut tray_icon, state, dark);
             }
 
             let mut d = daemon.lock().unwrap();
-            let old = d.state;
+            let old = d.state.clone();
             d.check_alive();
-            let new = d.state;
+            let new = d.state.clone();
             if new != old {
                 println!("[mmuvpn] State changed: {:?} -> {:?}", old, new);
-                update_tray(&mut tray_icon, new, dark);
-                update_menu(&start_item, &stop_item, new);
+                update_tray(&mut tray_icon, &new, dark);
+                update_menu(&start_item, &stop_item, &new);
             }
         }
     });
@@ -177,15 +181,16 @@ fn handle_cmd(
         Cmd::Start => {
             println!("[mmuvpn] Start VPN");
             daemon.lock().unwrap().start();
-            let state = daemon.lock().unwrap().state;
-            update_tray(tray, state, dark);
-            update_menu(start, stop, state);
+            let state = daemon.lock().unwrap().state.clone();
+            update_tray(tray, &state, dark);
+            update_menu(start, stop, &state);
         }
         Cmd::Stop => {
             println!("[mmuvpn] Stop VPN");
             daemon.lock().unwrap().stop();
-            update_tray(tray, State::Disconnected, dark);
-            update_menu(start, stop, State::Disconnected);
+            let state = daemon.lock().unwrap().state.clone();
+            update_tray(tray, &state, dark);
+            update_menu(start, stop, &state);
         }
         Cmd::Quit => {
             println!("[mmuvpn] Quit");
@@ -199,13 +204,13 @@ fn handle_cmd(
     false
 }
 
-fn update_tray(tray: &mut tray_icon::TrayIcon, state: State, dark: bool) {
+fn update_tray(tray: &mut tray_icon::TrayIcon, state: &State, dark: bool) {
     let _ = tray.set_icon(Some(icon_for_state(state, dark)));
     let _ = tray.set_tooltip(Some(format!("MMU VPN — {}", state.label())));
 }
 
-fn update_menu(start: &MenuItem, stop: &MenuItem, state: State) {
-    let active = state == State::Connected || state == State::Connecting;
+fn update_menu(start: &MenuItem, stop: &MenuItem, state: &State) {
+    let active = state.is_active();
     start.set_enabled(!active);
     stop.set_enabled(active);
 }
