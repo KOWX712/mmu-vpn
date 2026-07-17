@@ -1,6 +1,6 @@
 # Maintainer: KOWX712 <KOWX712@leecc0503@gmail.com>
 pkgname=mmu-vpn
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="OpenFortiVPN tray wrapper for Multimedia University"
 arch=('x86_64')
@@ -10,7 +10,7 @@ depends=('openfortivpn' 'polkit' 'xdotool')
 makedepends=('cargo')
 options=('!debug')
 source=("$url/archive/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('35e915c4d6a30cc269dc215a9b8b5c97a044b59c2947d6017930ed0524725c0a')
+sha256sums=('66a25c914aeb2ba43dd7ee3cd3d5097cf18e4f31dda91037af5ed6e56be0e5d1')
 
 prepare() {
     cd "$pkgname-$pkgver/daemon"
