@@ -12,6 +12,7 @@ resvg = "0.47"
 tiny-skia = "0.12"
 usvg = "0.47"
 dark-light = "2"
+notify-rust = "4.18"
 
 [profile.release]
 strip = true

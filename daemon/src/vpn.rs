@@ -13,6 +13,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub enum Notification {
+    Connected,
+    Error(String),
+    CampusDetected,
+}
+
 /// Platform-specific executables (compile-time static binding via #[cfg]).
 mod platform {
     #[cfg(target_os = "macos")]
@@ -163,6 +169,7 @@ pub struct VpnDaemon {
     connect_start: Option<Instant>,
     last_health_check: Instant,
     on_campus: bool,
+    pub notification_queue: Arc<Mutex<Vec<Notification>>>,
 }
 
 impl VpnDaemon {
@@ -177,6 +184,7 @@ impl VpnDaemon {
             connect_start: None,
             last_health_check: Instant::now(),
             on_campus: false,
+            notification_queue: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -205,6 +213,9 @@ impl VpnDaemon {
         if self.on_campus {
             println!("[vpn] University resources already accessible (campus network detected)");
             println!("[vpn] VPN connection will proceed anyway");
+            if let Ok(mut queue) = self.notification_queue.lock() {
+                queue.push(Notification::CampusDetected);
+            }
         }
 
         self.state = State::Connecting;
@@ -355,7 +366,8 @@ impl VpnDaemon {
             if let Some(start) = self.connect_start {
                 if start.elapsed() > Duration::from_secs(60) {
                     eprintln!("[vpn] Connection timeout - no tunnel after 60s");
-                    self.state = State::Error("Connection timeout - check logs or run --cleanup".to_string());
+                    let error_msg = "Connection timeout - check logs or run --cleanup".to_string();
+                    self.state = State::Error(error_msg.clone());
                     self.connect_start = None;
                     if let Some(mut child) = self.child.take() {
                         let _ = child.kill();
@@ -365,6 +377,9 @@ impl VpnDaemon {
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .status();
+                    if let Ok(mut queue) = self.notification_queue.lock() {
+                        queue.push(Notification::Error(error_msg));
+                    }
                     return;
                 }
             }
@@ -381,11 +396,18 @@ impl VpnDaemon {
                     self.connect_start = None;
                     self.last_health_check = Instant::now();
                     println!("[vpn] Connectivity verified - connected successfully");
+                    if let Ok(mut queue) = self.notification_queue.lock() {
+                        queue.push(Notification::Connected);
+                    }
                 } else if !self.on_campus {
                     // Not on campus and can't reach university - this is an error
                     eprintln!("[vpn] Tunnel up but university resources unreachable");
-                    self.state = State::Error("Tunnel up but no connectivity".to_string());
+                    let error_msg = "Tunnel up but no connectivity".to_string();
+                    self.state = State::Error(error_msg.clone());
                     self.connect_start = None;
+                    if let Ok(mut queue) = self.notification_queue.lock() {
+                        queue.push(Notification::Error(error_msg));
+                    }
                 }
                 // If on_campus=true, resources were accessible before, so we can't verify VPN is working
                 // In this case, trust the tunnel_up signal
@@ -414,7 +436,11 @@ impl VpnDaemon {
                     self.last_health_check = Instant::now();
                     if !check_university_reachable() {
                         eprintln!("[vpn] Health check failed - university resources unreachable");
-                        self.state = State::Error("Connection lost - university unreachable".to_string());
+                        let error_msg = "Connection lost - university unreachable".to_string();
+                        self.state = State::Error(error_msg.clone());
+                        if let Ok(mut queue) = self.notification_queue.lock() {
+                            queue.push(Notification::Error(error_msg));
+                        }
                     }
                 }
                 #[cfg(target_os = "macos")]
@@ -423,11 +449,15 @@ impl VpnDaemon {
             (State::Connecting, false, _) => {
                 if let Some(ref mut child) = self.child {
                     if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
-                        self.state = State::Error("openfortivpn process exited unexpectedly".to_string());
+                        let error_msg = "openfortivpn process exited unexpectedly".to_string();
+                        self.state = State::Error(error_msg.clone());
                         self.tunnel.up.store(false, Ordering::SeqCst);
                         self.connect_start = None;
                         if let Some(mut child) = self.child.take() {
                             let _ = child.wait();
+                        }
+                        if let Ok(mut queue) = self.notification_queue.lock() {
+                            queue.push(Notification::Error(error_msg));
                         }
                     }
                 } else {

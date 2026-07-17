@@ -4,12 +4,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use muda::{Menu, MenuItem};
+use notify_rust::Notification as DesktopNotification;
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 
 use crate::SingleInstance;
-use crate::vpn::{State, VpnDaemon};
+use crate::vpn::{Notification, State, VpnDaemon};
 
 const SVG_DISCONNECTED: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
@@ -69,6 +70,35 @@ fn wait_for_vpn_stop() {
             break;
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn show_notification(notif: &Notification) {
+    match notif {
+        Notification::Connected => {
+            let _ = DesktopNotification::new()
+                .summary("MMU VPN")
+                .body("Connected successfully")
+                .icon("network-vpn")
+                .timeout(3000)
+                .show();
+        }
+        Notification::Error(msg) => {
+            let _ = DesktopNotification::new()
+                .summary("MMU VPN Connection Failed")
+                .body(msg)
+                .icon("dialog-error")
+                .timeout(0) // Persistent notification
+                .show();
+        }
+        Notification::CampusDetected => {
+            let _ = DesktopNotification::new()
+                .summary("MMU VPN")
+                .body("Already on campus network - VPN may not be needed")
+                .icon("dialog-information")
+                .timeout(5000)
+                .show();
+        }
     }
 }
 
@@ -147,6 +177,13 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
         }
 
         if let Event::MainEventsCleared | Event::RedrawEventsCleared = event {
+            // Check for pending notifications
+            if let Ok(mut queue) = daemon.lock().unwrap().notification_queue.lock() {
+                for notif in queue.drain(..) {
+                    show_notification(&notif);
+                }
+            }
+
             let new_dark = is_dark();
             if new_dark != dark {
                 dark = new_dark;
