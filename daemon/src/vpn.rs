@@ -64,6 +64,7 @@ impl CommandSpec {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn with_env<K, V>(mut self, key: K, value: V) -> Self
     where
         K: Into<String>,
