@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::util::debug_logging_enabled;
 
+#[allow(dead_code)]
 pub enum Notification {
     Connected,
     Error(String),

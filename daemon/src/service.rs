@@ -233,11 +233,11 @@ fn probe_status() -> Result<ServiceStatus, String> {
     {
         let enabled = command_status("systemctl", &["--user", "is-enabled", "mmuvpn.service"])?;
         let running = command_status("systemctl", &["--user", "is-active", "mmuvpn.service"])?;
-        return Ok(ServiceStatus {
+        Ok(ServiceStatus {
             installed,
             enabled,
             running,
-        });
+        })
     }
 
     #[cfg(target_os = "macos")]

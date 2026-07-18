@@ -118,7 +118,11 @@ fn show_notification(notif: &Notification) {
 }
 
 pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleInstance) {
+    #[cfg(target_os = "macos")]
+    let mut event_loop = EventLoopBuilder::new().build();
+    #[cfg(not(target_os = "macos"))]
     let event_loop = EventLoopBuilder::new().build();
+
     #[cfg(target_os = "macos")]
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
