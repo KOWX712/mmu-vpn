@@ -181,14 +181,11 @@ clear_macos_quarantine() {
 
 install_macos() {
     local tag="$1"
-    local brew_prefix install_dir install_path
+    local app_name="MMU VPN.app"
+    local install_path="/Applications/${app_name}"
 
     check_macos_deps
     command -v openfortivpn &>/dev/null || brew install openfortivpn || die "Failed to install openfortivpn. Install it manually with: brew install openfortivpn"
-
-    brew_prefix=$(brew --prefix)
-    install_dir="${brew_prefix}/bin"
-    install_path="${install_dir}/${BINARY}"
 
     local filename="mmu-vpn-macos-universal.tar.gz"
     local url="https://github.com/${REPO}/releases/download/${tag}/${filename}"
@@ -198,9 +195,28 @@ install_macos() {
     trap "rm -rf '$tmpdir'" EXIT
     curl -fSL -o "${tmpdir}/${filename}" "$url" || die "Prebuilt binary not available at ${tag}"
     tar -xzf "${tmpdir}/${filename}" -C "$tmpdir"
-    install_file "${tmpdir}/mmuvpn" "$install_path" 755
-    clear_macos_quarantine "$install_path"
-    echo "Installed $PKG_NAME $tag (prebuilt)"
+
+    # Remove old installation if exists
+    if [ -d "$install_path" ]; then
+        echo "Removing old installation..."
+        rm -rf "$install_path"
+    fi
+
+    # Install app bundle
+    echo "Installing to ${install_path}..."
+    cp -r "${tmpdir}/${app_name}" "$install_path"
+
+    # Clear quarantine
+    if command -v xattr &>/dev/null; then
+        if ! xattr -dr com.apple.quarantine "$install_path" 2>/dev/null; then
+            echo "Warning: Failed to remove quarantine attribute. You may need to right-click and select 'Open' on first launch."
+        fi
+    fi
+
+    echo "Installed $PKG_NAME $tag"
+    echo ""
+    echo "To run: open '${install_path}'"
+    echo "Or: double-click 'MMU VPN' in Applications folder"
 }
 
 main() {

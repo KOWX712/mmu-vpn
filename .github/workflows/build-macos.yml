@@ -33,9 +33,26 @@ jobs:
             daemon/target/aarch64-apple-darwin/release/mmuvpn \
             -output daemon/target/universal/release/mmuvpn
 
+      - name: Create App Bundle
+        run: |
+          APP_BUNDLE="daemon/target/universal/release/MMU VPN.app"
+          mkdir -p "${APP_BUNDLE}/Contents/MacOS"
+          mkdir -p "${APP_BUNDLE}/Contents/Resources"
+
+          # Copy binary
+          cp daemon/target/universal/release/mmuvpn "${APP_BUNDLE}/Contents/MacOS/mmuvpn"
+          chmod +x "${APP_BUNDLE}/Contents/MacOS/mmuvpn"
+
+          # Copy Info.plist
+          cp daemon/macos/Info.plist "${APP_BUNDLE}/Contents/Info.plist"
+
+          # Create PkgInfo
+          printf "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
+
       - name: Package
         run: |
-          tar -czf mmu-vpn-macos-universal.tar.gz -C daemon/target/universal/release mmuvpn
+          cd daemon/target/universal/release
+          tar -czf ../../../../mmu-vpn-macos-universal.tar.gz "MMU VPN.app"
 
       - uses: actions/upload-artifact@v7
         with:

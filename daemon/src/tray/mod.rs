@@ -1,11 +1,11 @@
+mod notification;
+
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use muda::{Menu, MenuItem};
-#[cfg(not(target_os = "macos"))]
-use notify_rust::Notification as DesktopNotification;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "macos")]
@@ -13,16 +13,17 @@ use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
 use crate::util::debug_logging_enabled;
-use crate::vpn::{Notification, State, VpnDaemon};
+use crate::vpn::{State, VpnDaemon};
 use crate::SingleInstance;
+use notification::show_notification;
 
 const SVG_DISCONNECTED: &[u8] =
-    include_bytes!("../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
+    include_bytes!("../../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
 const SVG_CONNECTING: &[u8] =
-    include_bytes!("../icons/hicolor/scalable/status/network-vpn-acquiring.svg");
-const SVG_CONNECTED: &[u8] = include_bytes!("../icons/hicolor/scalable/status/network-vpn.svg");
+    include_bytes!("../../icons/hicolor/scalable/status/network-vpn-acquiring.svg");
+const SVG_CONNECTED: &[u8] = include_bytes!("../../icons/hicolor/scalable/status/network-vpn.svg");
 const SVG_ERROR: &[u8] =
-    include_bytes!("../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
+    include_bytes!("../../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
 
 enum Cmd {
     Start,
@@ -76,46 +77,6 @@ fn wait_for_vpn_stop() {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn show_notification(notif: &Notification) {
-    // macOS users rely on menu bar icon state, not desktop notifications.
-    // Desktop notifications are suppressed to avoid the notify-rust "use_default"
-    // popup that triggers an application chooser dialog.
-    match notif {
-        Notification::Connected | Notification::CampusDetected => {}
-        Notification::Error(_) => {}
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn show_notification(notif: &Notification) {
-    match notif {
-        Notification::Connected => {
-            let _ = DesktopNotification::new()
-                .summary("MMU VPN")
-                .body("Connected successfully")
-                .icon("network-vpn")
-                .timeout(3000)
-                .show();
-        }
-        Notification::Error(msg) => {
-            let _ = DesktopNotification::new()
-                .summary("MMU VPN Connection Failed")
-                .body(msg)
-                .icon("dialog-error")
-                .timeout(0) // Persistent notification
-                .show();
-        }
-        Notification::CampusDetected => {
-            let _ = DesktopNotification::new()
-                .summary("MMU VPN")
-                .body("Already on campus network - VPN may not be needed")
-                .icon("dialog-information")
-                .timeout(5000)
-                .show();
-        }
-    }
-}
 
 pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleInstance) {
     #[cfg(target_os = "macos")]

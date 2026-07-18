@@ -1,3 +1,4 @@
+mod platform;
 mod service;
 mod tray;
 mod util;
