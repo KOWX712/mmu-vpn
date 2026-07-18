@@ -12,6 +12,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
+use crate::util::debug_logging_enabled;
 use crate::vpn::{Notification, State, VpnDaemon};
 use crate::SingleInstance;
 
@@ -31,10 +32,6 @@ enum Cmd {
 
 fn is_dark() -> bool {
     matches!(dark_light::detect(), Ok(dark_light::Mode::Dark))
-}
-
-fn debug_logging_enabled() -> bool {
-    std::env::var("MMUVPN_DEBUG").is_ok_and(|value| value == "1")
 }
 
 fn svg_to_icon(svg_data: &[u8], dark: bool) -> Icon {
@@ -81,11 +78,12 @@ fn wait_for_vpn_stop() {
 
 #[cfg(target_os = "macos")]
 fn show_notification(notif: &Notification) {
+    // macOS users rely on menu bar icon state, not desktop notifications.
+    // Desktop notifications are suppressed to avoid the notify-rust "use_default"
+    // popup that triggers an application chooser dialog.
     match notif {
         Notification::Connected | Notification::CampusDetected => {}
-        Notification::Error(msg) => {
-            let _ = msg;
-        }
+        Notification::Error(_) => {}
     }
 }
 
@@ -120,7 +118,7 @@ fn show_notification(notif: &Notification) {
 }
 
 pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleInstance) {
-    let mut event_loop = EventLoopBuilder::new().build();
+    let event_loop = EventLoopBuilder::new().build();
     #[cfg(target_os = "macos")]
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
 

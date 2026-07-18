@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::util::debug_logging_enabled;
+
 pub enum Notification {
     Connected,
     Error(String),
@@ -72,18 +74,14 @@ impl CommandSpec {
     }
 }
 
-fn build_command(spec: &CommandSpec) -> Command {
+fn build_command(spec: &CommandSpec) -> Result<Command, String> {
     #[cfg(target_os = "macos")]
-    ensure_sudo_askpass_helper(spec);
+    ensure_sudo_askpass_helper(spec)?;
 
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
     command.envs(spec.env.iter().map(|(key, value)| (key, value)));
-    command
-}
-
-fn debug_logging_enabled() -> bool {
-    std::env::var("MMUVPN_DEBUG").is_ok_and(|value| value == "1")
+    Ok(command)
 }
 
 fn which_binary(name: &str) -> Option<String> {
@@ -169,19 +167,30 @@ fn sudo_askpass_path() -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn ensure_sudo_askpass_helper(spec: &CommandSpec) {
+fn ensure_sudo_askpass_helper(spec: &CommandSpec) -> Result<(), String> {
     let Some((_, askpass_path)) = spec.env.iter().find(|(key, _)| key == "SUDO_ASKPASS") else {
-        return;
+        return Ok(());
     };
 
     let path = PathBuf::from(askpass_path);
+
+    // Check if helper already exists and is valid
+    if path.exists() {
+        if let Ok(metadata) = fs::metadata(&path) {
+            let permissions = metadata.permissions();
+            // Verify it's executable (mode 0o700)
+            if permissions.mode() & 0o700 == 0o700 {
+                return Ok(());
+            }
+        }
+    }
+
     let Some(dir) = path.parent() else {
-        return;
+        return Err("Invalid askpass helper path".to_string());
     };
 
-    if let Err(e) = fs::create_dir_all(&dir) {
-        eprintln!("[vpn] Failed to create sudo askpass helper dir: {}", e);
-    }
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create sudo askpass helper dir: {}", e))?;
 
     let script = r#"#!/bin/sh
 /usr/bin/osascript <<'APPLESCRIPT'
@@ -190,11 +199,13 @@ text returned of result
 APPLESCRIPT
 "#;
 
-    if let Err(e) = fs::write(&path, script) {
-        eprintln!("[vpn] Failed to write sudo askpass helper: {}", e);
-    } else if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o700)) {
-        eprintln!("[vpn] Failed to make sudo askpass helper executable: {}", e);
-    }
+    fs::write(&path, script)
+        .map_err(|e| format!("Failed to write sudo askpass helper: {}", e))?;
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("Failed to make sudo askpass helper executable: {}", e))?;
+
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -313,7 +324,15 @@ impl VpnDaemon {
 
         let gateway_port = format!("{}:{}", GATEWAY, PORT);
         let start_command = start_vpn_command(&gateway_port);
-        match build_command(&start_command)
+        let mut command = match build_command(&start_command) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                eprintln!("[vpn] Failed to prepare start command: {}", e);
+                self.state = State::Error(format!("Setup failed: {}", e));
+                return;
+            }
+        };
+        match command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -333,10 +352,10 @@ impl VpnDaemon {
                             if line.contains("Authenticate at") {
                                 if let Some(url) = extract_saml_url(&line) {
                                     println!("[vpn] Opening SAML URL: {}", url);
-                                    if let Ok(mut child) =
-                                        build_command(&open_url_command(&url)).spawn()
-                                    {
-                                        let _ = child.wait();
+                                    if let Ok(mut open_cmd) = build_command(&open_url_command(&url)) {
+                                        if let Ok(mut child) = open_cmd.spawn() {
+                                            let _ = child.wait();
+                                        }
                                     }
                                 }
                             }
@@ -385,10 +404,9 @@ impl VpnDaemon {
         #[cfg(not(target_os = "macos"))]
         if let Some(pid) = child_pid {
             println!("[vpn] Sending SIGINT to openfortivpn PID {}", pid);
-            let _ = build_command(&signal_process_command(pid))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            if let Ok(mut cmd) = build_command(&signal_process_command(pid)) {
+                let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+            }
         }
 
         // Take child and wait in background thread
@@ -416,10 +434,9 @@ impl VpnDaemon {
 
         // Always use pkill as backup to catch any orphaned processes
         println!("[vpn] Running pkill to ensure cleanup");
-        let _ = build_command(&fallback_stop_command())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if let Ok(mut cmd) = build_command(&fallback_stop_command()) {
+            let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
 
         #[cfg(target_os = "macos")]
         {
@@ -461,10 +478,9 @@ impl VpnDaemon {
                         let _ = child.kill();
                         let _ = child.wait();
                     }
-                    let _ = build_command(&fallback_stop_command())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
+                    if let Ok(mut cmd) = build_command(&fallback_stop_command()) {
+                        let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+                    }
                     if let Ok(mut queue) = self.notification_queue.lock() {
                         queue.push(Notification::Error(error_msg));
                     }
@@ -485,6 +501,18 @@ impl VpnDaemon {
                 } else {
                     // Not on campus and can't reach university - this is an error
                     eprintln!("[vpn] Tunnel up but university resources unreachable");
+
+                    // Rollback DNS changes if they were applied
+                    #[cfg(target_os = "macos")]
+                    if self.dns_applied {
+                        if let Err(e) = restore_macos_dns_from_backup() {
+                            eprintln!("[vpn] Failed to rollback DNS after verification failure: {}", e);
+                        } else {
+                            println!("[vpn] Rolled back DNS changes due to connectivity failure");
+                        }
+                        self.dns_applied = false;
+                    }
+
                     let error_msg = "Tunnel up but no connectivity".to_string();
                     self.state = State::Error(error_msg.clone());
                     self.connect_start = None;
@@ -631,6 +659,9 @@ fn check_university_reachable() -> bool {
 }
 
 fn tunnel_connectivity_acceptable(on_campus: bool, reachable_now: bool) -> bool {
+    // When on_campus is true, university resources were reachable before connecting,
+    // so we can't verify the VPN is working by checking them again. Trust tunnel_up signal.
+    // When off campus, we must verify the VPN actually provides connectivity.
     on_campus || reachable_now
 }
 
@@ -644,10 +675,9 @@ pub fn emergency_cleanup() {
             Ok(()) => println!("Cleanup finished."),
             Err(e) => {
                 eprintln!("Combined cleanup failed ({e}); trying fallbacks...");
-                let _ = build_command(&fallback_stop_command())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                if let Ok(mut cmd) = build_command(&fallback_stop_command()) {
+                    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+                }
                 match restore_macos_dns_from_backup() {
                     Ok(true) => println!("Restored previous DNS settings."),
                     Ok(false) => {
@@ -673,10 +703,9 @@ pub fn emergency_cleanup() {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = build_command(&fallback_stop_command())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if let Ok(mut cmd) = build_command(&fallback_stop_command()) {
+            let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
         println!("VPN stop signal sent.");
     }
 }

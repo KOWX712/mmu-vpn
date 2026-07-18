@@ -1,5 +1,6 @@
 mod service;
 mod tray;
+mod util;
 mod vpn;
 
 use std::fs;
