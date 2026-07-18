@@ -4,20 +4,22 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use muda::{Menu, MenuItem};
+#[cfg(not(target_os = "macos"))]
 use notify_rust::Notification as DesktopNotification;
-use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+#[cfg(target_os = "macos")]
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
-use crate::SingleInstance;
 use crate::vpn::{Notification, State, VpnDaemon};
+use crate::SingleInstance;
 
 const SVG_DISCONNECTED: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
 const SVG_CONNECTING: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn-acquiring.svg");
-const SVG_CONNECTED: &[u8] =
-    include_bytes!("../icons/hicolor/scalable/status/network-vpn.svg");
+const SVG_CONNECTED: &[u8] = include_bytes!("../icons/hicolor/scalable/status/network-vpn.svg");
 const SVG_ERROR: &[u8] =
     include_bytes!("../icons/hicolor/scalable/status/network-vpn-disconnected.svg");
 
@@ -29,6 +31,10 @@ enum Cmd {
 
 fn is_dark() -> bool {
     matches!(dark_light::detect(), Ok(dark_light::Mode::Dark))
+}
+
+fn debug_logging_enabled() -> bool {
+    std::env::var("MMUVPN_DEBUG").is_ok_and(|value| value == "1")
 }
 
 fn svg_to_icon(svg_data: &[u8], dark: bool) -> Icon {
@@ -73,6 +79,17 @@ fn wait_for_vpn_stop() {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn show_notification(notif: &Notification) {
+    match notif {
+        Notification::Connected | Notification::CampusDetected => {}
+        Notification::Error(msg) => {
+            let _ = msg;
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn show_notification(notif: &Notification) {
     match notif {
         Notification::Connected => {
@@ -103,19 +120,25 @@ fn show_notification(notif: &Notification) {
 }
 
 pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleInstance) {
-    let event_loop = EventLoopBuilder::new().build();
+    let mut event_loop = EventLoopBuilder::new().build();
+    #[cfg(target_os = "macos")]
+    event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
     let menu = Menu::new();
     let start_item = MenuItem::new("Start VPN", true, None);
     let stop_item = MenuItem::new("Stop VPN", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
     stop_item.set_enabled(false);
-    menu.append_items(&[&start_item, &stop_item, &quit_item]).unwrap();
+    menu.append_items(&[&start_item, &stop_item, &quit_item])
+        .unwrap();
 
     let mut dark = is_dark();
     let mut tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip(format!("MMU VPN — {}", daemon.lock().unwrap().state.label()))
+        .with_tooltip(format!(
+            "MMU VPN — {}",
+            daemon.lock().unwrap().state.label()
+        ))
         .with_icon(icon_for_state(&State::Disconnected, dark))
         .build()
         .expect("Failed to create tray icon");
@@ -129,6 +152,7 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
 
     let menu_channel = muda::MenuEvent::receiver();
     let tray_channel = TrayIconEvent::receiver();
+    let debug_logs = debug_logging_enabled();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -149,14 +173,24 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
                 None
             };
             if let Some(cmd) = cmd {
-                if handle_cmd(cmd, &mut tray_icon, &start_item, &stop_item, &daemon, dark, control_flow) {
+                if handle_cmd(
+                    cmd,
+                    &mut tray_icon,
+                    &start_item,
+                    &stop_item,
+                    &daemon,
+                    dark,
+                    control_flow,
+                ) {
                     return;
                 }
             }
         }
 
         while let Ok(event) = tray_channel.try_recv() {
-            println!("[mmuvpn] Tray event: {:?}", event);
+            if debug_logs {
+                println!("[mmuvpn] Tray event: {:?}", event);
+            }
         }
 
         while let Some(cmd) = instance.accept_pending() {
@@ -170,7 +204,15 @@ pub fn run(daemon: Arc<Mutex<VpnDaemon>>, auto_connect: bool, instance: SingleIn
                 }
             };
             if let Some(cmd) = cmd {
-                if handle_cmd(cmd, &mut tray_icon, &start_item, &stop_item, &daemon, dark, control_flow) {
+                if handle_cmd(
+                    cmd,
+                    &mut tray_icon,
+                    &start_item,
+                    &stop_item,
+                    &daemon,
+                    dark,
+                    control_flow,
+                ) {
                     return;
                 }
             }

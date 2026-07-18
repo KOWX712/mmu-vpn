@@ -23,7 +23,9 @@ impl SingleInstance {
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path).ok()?;
         listener.set_nonblocking(true).ok();
-        Some(SingleInstance { _listener: listener })
+        Some(SingleInstance {
+            _listener: listener,
+        })
     }
 
     fn accept_pending(&self) -> Option<String> {

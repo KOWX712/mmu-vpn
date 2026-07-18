@@ -1,12 +1,14 @@
 #[cfg(target_os = "macos")]
 use std::fs;
-use std::io::{BufRead, BufReader};
 #[cfg(target_os = "macos")]
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 #[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,6 +45,7 @@ const DNS_BACKUP_PATH: &str = "/tmp/mmuvpn-dns-backup";
 struct CommandSpec {
     program: String,
     args: Vec<String>,
+    env: Vec<(String, String)>,
 }
 
 impl CommandSpec {
@@ -55,14 +58,32 @@ impl CommandSpec {
         Self {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
+            env: Vec::new(),
         }
+    }
+
+    fn with_env<K, V>(mut self, key: K, value: V) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.env.push((key.into(), value.into()));
+        self
     }
 }
 
 fn build_command(spec: &CommandSpec) -> Command {
+    #[cfg(target_os = "macos")]
+    ensure_sudo_askpass_helper(spec);
+
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
+    command.envs(spec.env.iter().map(|(key, value)| (key, value)));
     command
+}
+
+fn debug_logging_enabled() -> bool {
+    std::env::var("MMUVPN_DEBUG").is_ok_and(|value| value == "1")
 }
 
 fn which_binary(name: &str) -> Option<String> {
@@ -97,14 +118,16 @@ fn openfortivpn_bin() -> String {
 }
 
 fn start_vpn_command(gateway_port: &str) -> CommandSpec {
-    CommandSpec::new(
+    with_macos_askpass(CommandSpec::new(
         platform::SUDO,
         [
+            #[cfg(target_os = "macos")]
+            "-A".to_string(),
             openfortivpn_bin(),
             gateway_port.to_string(),
             "--saml-login".to_string(),
         ],
-    )
+    ))
 }
 
 fn open_url_command(url: &str) -> CommandSpec {
@@ -112,7 +135,66 @@ fn open_url_command(url: &str) -> CommandSpec {
 }
 
 fn fallback_stop_command() -> CommandSpec {
-    CommandSpec::new(platform::SUDO, ["pkill", "-INT", "openfortivpn"])
+    with_macos_askpass(CommandSpec::new(
+        platform::SUDO,
+        [
+            #[cfg(target_os = "macos")]
+            "-A",
+            "pkill",
+            "-INT",
+            "openfortivpn",
+        ],
+    ))
+}
+
+fn with_macos_askpass(spec: CommandSpec) -> CommandSpec {
+    #[cfg(target_os = "macos")]
+    {
+        spec.with_env("SUDO_ASKPASS", sudo_askpass_path())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        spec
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sudo_askpass_path() -> String {
+    let dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Caches/mmuvpn"))
+        .unwrap_or_else(|| std::env::temp_dir().join("mmuvpn"));
+    dir.join("mmuvpn-askpass.sh").to_string_lossy().to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_sudo_askpass_helper(spec: &CommandSpec) {
+    let Some((_, askpass_path)) = spec.env.iter().find(|(key, _)| key == "SUDO_ASKPASS") else {
+        return;
+    };
+
+    let path = PathBuf::from(askpass_path);
+    let Some(dir) = path.parent() else {
+        return;
+    };
+
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("[vpn] Failed to create sudo askpass helper dir: {}", e);
+    }
+
+    let script = r#"#!/bin/sh
+/usr/bin/osascript <<'APPLESCRIPT'
+display dialog "MMU VPN needs administrator permission." default answer "" with hidden answer buttons {"OK"} default button "OK" with title "MMU VPN"
+text returned of result
+APPLESCRIPT
+"#;
+
+    if let Err(e) = fs::write(&path, script) {
+        eprintln!("[vpn] Failed to write sudo askpass helper: {}", e);
+    } else if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o700)) {
+        eprintln!("[vpn] Failed to make sudo askpass helper executable: {}", e);
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -240,11 +322,14 @@ impl VpnDaemon {
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
                 let tunnel = Arc::clone(&self.tunnel);
+                let debug_logs = debug_logging_enabled();
 
                 thread::spawn(move || {
                     if let Some(stdout) = stdout {
                         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                            println!("[vpn] {}", line);
+                            if debug_logs {
+                                println!("[vpn] {}", line);
+                            }
                             if line.contains("Authenticate at") {
                                 if let Some(url) = extract_saml_url(&line) {
                                     println!("[vpn] Opening SAML URL: {}", url);
@@ -269,10 +354,13 @@ impl VpnDaemon {
                     }
                 });
 
+                let debug_logs = debug_logging_enabled();
                 thread::spawn(move || {
                     if let Some(stderr) = stderr {
                         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                            eprintln!("[vpn] {}", line);
+                            if debug_logs {
+                                eprintln!("[vpn] {}", line);
+                            }
                         }
                     }
                 });
@@ -387,19 +475,14 @@ impl VpnDaemon {
 
         match (&self.state, running, tunnel_up) {
             (State::Connecting, true, true) => {
+                #[cfg(target_os = "macos")]
+                self.apply_macos_dns_if_needed();
+
                 // Verify connectivity before declaring success
                 println!("[vpn] Tunnel reported up, verifying connectivity...");
-                if check_university_reachable() {
-                    #[cfg(target_os = "macos")]
-                    self.apply_macos_dns_if_needed();
-                    self.state = State::Connected;
-                    self.connect_start = None;
-                    self.last_health_check = Instant::now();
-                    println!("[vpn] Connectivity verified - connected successfully");
-                    if let Ok(mut queue) = self.notification_queue.lock() {
-                        queue.push(Notification::Connected);
-                    }
-                } else if !self.on_campus {
+                if tunnel_connectivity_acceptable(self.on_campus, check_university_reachable()) {
+                    self.mark_connected();
+                } else {
                     // Not on campus and can't reach university - this is an error
                     eprintln!("[vpn] Tunnel up but university resources unreachable");
                     let error_msg = "Tunnel up but no connectivity".to_string();
@@ -409,8 +492,6 @@ impl VpnDaemon {
                         queue.push(Notification::Error(error_msg));
                     }
                 }
-                // If on_campus=true, resources were accessible before, so we can't verify VPN is working
-                // In this case, trust the tunnel_up signal
             }
             (State::Connecting, true, false) => {
                 // Still connecting, do nothing
@@ -478,6 +559,16 @@ impl VpnDaemon {
         }
     }
 
+    fn mark_connected(&mut self) {
+        self.state = State::Connected;
+        self.connect_start = None;
+        self.last_health_check = Instant::now();
+        println!("[vpn] Connectivity verified - connected successfully");
+        if let Ok(mut queue) = self.notification_queue.lock() {
+            queue.push(Notification::Connected);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn apply_macos_dns_if_needed(&mut self) {
         if self.dns_applied {
@@ -514,10 +605,7 @@ impl VpnDaemon {
         match set_dns_servers(&service, Some(&servers)) {
             Ok(()) => {
                 self.dns_applied = true;
-                println!(
-                    "[vpn] Applied macOS DNS on '{}': {:?}",
-                    service, servers
-                );
+                println!("[vpn] Applied macOS DNS on '{}': {:?}", service, servers);
             }
             Err(e) => eprintln!("[vpn] Failed to apply macOS DNS: {}", e),
         }
@@ -540,6 +628,10 @@ fn check_university_reachable() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn tunnel_connectivity_acceptable(on_campus: bool, reachable_now: bool) -> bool {
+    on_campus || reachable_now
 }
 
 /// Full cleanup usable without a running tray: stop VPN + restore DNS.
@@ -613,7 +705,12 @@ fn extract_vpn_nameservers(line: &str) -> Option<Vec<String>> {
 fn extract_saml_url(line: &str) -> Option<String> {
     let start = line.find('\'')? + 1;
     let end = line[start..].find('\'')? + start;
-    Some(line[start..end].to_string())
+    let candidate = &line[start..end];
+    if candidate.starts_with("https://") || candidate.starts_with("http://") {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -776,9 +873,8 @@ fn read_dns_backup() -> Result<Option<SavedDns>, String> {
 /// Kill openfortivpn and restore DNS in a single admin authorization.
 #[cfg(target_os = "macos")]
 fn stop_vpn_and_restore_dns() -> Result<(), String> {
-    let mut script = String::from(
-        "/usr/bin/pkill -INT openfortivpn 2>/dev/null || true; /bin/sleep 1; ",
-    );
+    let mut script =
+        String::from("/usr/bin/pkill -INT openfortivpn 2>/dev/null || true; /bin/sleep 1; ");
     if let Some(saved) = read_dns_backup()? {
         script.push_str(&dns_change_shell(&saved.service, saved.servers.as_deref()));
         script.push_str("; ");
@@ -802,10 +898,7 @@ fn stop_vpn_and_restore_dns() -> Result<(), String> {
                 script.push_str("; ");
                 script.push_str(DNS_FLUSH_SHELL);
                 run_admin_shell(&script)?;
-                println!(
-                    "[vpn] Stopped VPN and cleared stuck DNS on '{}'",
-                    service
-                );
+                println!("[vpn] Stopped VPN and cleared stuck DNS on '{}'", service);
             } else {
                 run_admin_shell(&script)?;
                 println!("[vpn] Stopped VPN (no DNS backup to restore)");
@@ -956,20 +1049,45 @@ mod tests {
     }
 
     #[test]
+    fn ignores_non_url_saml_browser_tokens() {
+        assert_eq!(
+            extract_saml_url("[vpn] Authenticate at 'use_default'"),
+            None
+        );
+    }
+
+    #[test]
     fn extracts_vpn_nameservers_from_openfortivpn_output() {
         let line = "INFO:   Got addresses: [10.9.12.1], ns [10.242.3.201, 10.242.3.200]";
         assert_eq!(
             extract_vpn_nameservers(line),
-            Some(vec![
-                "10.242.3.201".to_string(),
-                "10.242.3.200".to_string()
-            ])
+            Some(vec!["10.242.3.201".to_string(), "10.242.3.200".to_string()])
         );
     }
 
     #[test]
     fn returns_none_when_nameservers_missing() {
         assert_eq!(extract_vpn_nameservers("INFO: Tunnel is up"), None);
+    }
+
+    #[test]
+    fn campus_detected_allows_tunnel_without_rechecking_reachability() {
+        assert!(tunnel_connectivity_acceptable(true, false));
+    }
+
+    #[test]
+    fn marking_connected_clears_connecting_state_and_notifies() {
+        let mut daemon = VpnDaemon::new();
+        daemon.state = State::Connecting;
+        daemon.connect_start = Some(Instant::now());
+
+        daemon.mark_connected();
+
+        assert_eq!(daemon.state, State::Connected);
+        assert!(daemon.connect_start.is_none());
+        let queue = daemon.notification_queue.lock().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(matches!(queue[0], Notification::Connected));
     }
 
     #[cfg(target_os = "macos")]
@@ -985,13 +1103,35 @@ mod tests {
     fn start_vpn_uses_platform_sudo() {
         let start = start_vpn_command("vpnmlk.mmu.edu.my:443");
         assert_eq!(start.program, platform::SUDO);
-        assert!(
-            start.args[0].ends_with("openfortivpn") || start.args[0] == "openfortivpn",
-            "expected openfortivpn path, got {}",
-            start.args[0]
-        );
-        assert_eq!(start.args[1], "vpnmlk.mmu.edu.my:443");
-        assert_eq!(start.args[2], "--saml-login");
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(start.args[0], "-A");
+            assert!(
+                start.args[1].ends_with("openfortivpn") || start.args[1] == "openfortivpn",
+                "expected openfortivpn path, got {}",
+                start.args[1]
+            );
+            assert_eq!(start.args[2], "vpnmlk.mmu.edu.my:443");
+            assert_eq!(start.args[3], "--saml-login");
+            let askpass = start
+                .env
+                .iter()
+                .find(|(key, _)| key == "SUDO_ASKPASS")
+                .map(|(_, value)| value)
+                .expect("expected SUDO_ASKPASS env");
+            assert!(askpass.ends_with("mmuvpn-askpass.sh"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(
+                start.args[0].ends_with("openfortivpn") || start.args[0] == "openfortivpn",
+                "expected openfortivpn path, got {}",
+                start.args[0]
+            );
+            assert_eq!(start.args[1], "vpnmlk.mmu.edu.my:443");
+            assert_eq!(start.args[2], "--saml-login");
+            assert!(start.env.is_empty());
+        }
     }
 
     #[test]
@@ -1005,7 +1145,22 @@ mod tests {
     fn fallback_stop_uses_platform_sudo() {
         let stop = fallback_stop_command();
         assert_eq!(stop.program, platform::SUDO);
-        assert_eq!(stop.args, vec!["pkill", "-INT", "openfortivpn"]);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(stop.args, vec!["-A", "pkill", "-INT", "openfortivpn"]);
+            let askpass = stop
+                .env
+                .iter()
+                .find(|(key, _)| key == "SUDO_ASKPASS")
+                .map(|(_, value)| value)
+                .expect("expected SUDO_ASKPASS env");
+            assert!(askpass.ends_with("mmuvpn-askpass.sh"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(stop.args, vec!["pkill", "-INT", "openfortivpn"]);
+            assert!(stop.env.is_empty());
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
